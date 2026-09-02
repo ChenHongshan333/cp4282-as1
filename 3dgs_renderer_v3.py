@@ -64,15 +64,43 @@ def rasterize_tiles(
 
     px = float(px_i) + 0.5
     py = float(py_i) + 0.5
-    # TODO: Compute the RGB value at image[pixel].
-    # Composite only this pixel's tile list, `tile_offsets[tile] .. tile_offsets[tile + 1]`,
-    # which the builder has already sorted near to far. Finish with the background
-    # weighted by the remaining transmittance, matching 3dgs_renderer_v1.
 
-    # TODO: The RHS is a placeholder
-    image[pixel] = wp.vec3(0.0, 0.0, 0.0)
+    pixel_color = wp.vec3(0.0, 0.0, 0.0)
+    transmittance = float(1.0)
+
+    # The builder groups records by tile and preserves their near-to-far order.
+    start = tile_offsets[tile]
+    end = tile_offsets[tile + 1]
+    for pair_index in range(start, end):
+        # The upper 32 bits contain the tile; the lower 32 bits contain the splat id.
+        splat = int(packed_pairs[pair_index] & wp.uint64(0xFFFFFFFF))
+
+        dx = px - centres[splat][0]
+        dy = py - centres[splat][1]
+        conic = conics[splat]
+        mahalanobis_squared = (
+            conic[0] * dx * dx
+            + 2.0 * conic[1] * dx * dy
+            + conic[2] * dy * dy
+        )
+
+        if mahalanobis_squared > supports[splat]:
+            continue
+
+        alpha = opacities[splat] * wp.exp(-0.5 * mahalanobis_squared)
+        alpha = wp.min(alpha, 0.99)
+        if alpha < ALPHA_CUTOFF:
+            continue
+
+        pixel_color = pixel_color + transmittance * alpha * colours[splat]
+        transmittance = transmittance * (1.0 - alpha)
+        if transmittance < TRANSMITTANCE_CUTOFF:
+            break
+
+    image[pixel] = pixel_color + transmittance * background
 
 
+# orchestrate v3 pipeline
 class GaussianFirstWarpRenderer:
     """Persistent Warp storage for Gaussian-first tile assignment and tiled rasterization."""
 
@@ -83,15 +111,19 @@ class GaussianFirstWarpRenderer:
         maximum_splats: int,
         device: str,
         tile_size: int = 16,
-        tile_pair_capacity: int | None = None,
+        tile_pair_capacity: int | None = None, 
     ):
         self.width = width
         self.height = height
         self.maximum_splats = maximum_splats
+
+        # calculate the number of tiles
         self.tile_size = tile_size
         self.tiles_x = (width + tile_size - 1) // tile_size
         self.tiles_y = (height + tile_size - 1) // tile_size
         self.tile_count = self.tiles_x * self.tiles_y
+
+        # capacity of tile-pair
         self.tile_pair_capacity = (
             int(tile_pair_capacity)
             if tile_pair_capacity is not None
@@ -104,7 +136,7 @@ class GaussianFirstWarpRenderer:
         self.colours = wp.zeros(maximum_splats, dtype=wp.vec3, device=self.device)
         self.opacities = wp.zeros(maximum_splats, dtype=wp.float32, device=self.device)
         self.supports = wp.zeros(maximum_splats, dtype=wp.float32, device=self.device)
-        self.depths = wp.zeros(maximum_splats, dtype=wp.float32, device=self.device)
+        self.depths = wp.zeros(maximum_splats, dtype=wp.float32, device=self.device) # newly added compared to v2
         self.group_ids = wp.zeros(maximum_splats, dtype=wp.int32, device=self.device)
         self.splat_ids = wp.array(
             np.arange(maximum_splats, dtype=np.uint32), dtype=wp.uint32, device=self.device
@@ -138,6 +170,7 @@ class GaussianFirstWarpRenderer:
         self.supports.assign(wp.array(supports, dtype=wp.float32, device=self.device))
         self.depths.assign(wp.array(projected.depths, dtype=wp.float32, device=self.device))
 
+        # build tile array
         offsets, packed_pairs, _ = self.builder.build(
             self.centres,
             self.conics,
