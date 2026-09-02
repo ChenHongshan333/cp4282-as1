@@ -14,8 +14,9 @@ import importlib
 
 import numpy as np
 from PIL import Image
-import warp as wp
+import warp as wp # concurrently run CPU/GPU
 
+# Reuse the functions provided by v1
 _reference = importlib.import_module("3dgs_renderer_v1")
 Camera = _reference.Camera
 GaussianSet = _reference.GaussianSet
@@ -26,18 +27,19 @@ ALPHA_CUTOFF = _reference.ALPHA_CUTOFF
 TRANSMITTANCE_CUTOFF = 1.0e-4
 
 
-@wp.kernel
+@wp.kernel # indicate that this is a compuation function that can be concurrently ran by Wrap
 def rasterize(
-    centres: wp.array(dtype=wp.vec2),
-    conics: wp.array(dtype=wp.vec3),
-    colours: wp.array(dtype=wp.vec3),
-    opacities: wp.array(dtype=wp.float32),
-    supports: wp.array(dtype=wp.float32),
-    count: int,
-    width: int,
-    background: wp.vec3,
-    image: wp.array(dtype=wp.vec3),
+    centres: wp.array(dtype=wp.vec2), # the center (x, y) for each Gaussian
+    conics: wp.array(dtype=wp.vec3), # the shape of each Gaussian
+    colours: wp.array(dtype=wp.vec3), # the color of each Gaussian
+    opacities: wp.array(dtype=wp.float32), # the opacity of each Gaussian
+    supports: wp.array(dtype=wp.float32), # the effective range of each Gaussian
+    count: int, # the number of visible Gaussians
+    width: int, # width of image
+    background: wp.vec3, # background color, set to white by default
+    image: wp.array(dtype=wp.vec3), # the image that kernel will write to
 ):
+    # make sure which pixel should be handled by which task
     pixel = wp.tid()
     px = float(pixel % width) + 0.5
     py = float(pixel // width) + 0.5
@@ -45,11 +47,15 @@ def rasterize(
     # One work item per pixel: walk the globally depth-sorted splats, accumulate
     # front to back, and composite the background with the leftover transmittance.
     # This must reproduce 3dgs_renderer_v1 exactly.
+    
 
     # TODO: The RHS is a placeholder
     image[pixel] = wp.vec3(0.0, 0.0, 0.0)
 
-
+# manage Wrap memory
+# it does 2 things:
+# 1. apply for memory in CPU/GPU in advance
+# 2. put data into the memory and then start kernel
 class WarpRenderer:
     """Persistent Warp storage for the screen-space records and rendered pixels."""
 
@@ -63,18 +69,26 @@ class WarpRenderer:
         self.supports = wp.zeros(maximum_splats, dtype=wp.float32, device=self.device)
         self.image = wp.zeros(width * height, dtype=wp.vec3, device=self.device)
 
+    # render
     def render(self, splats: GaussianSet, camera: Camera,
                background: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> np.ndarray:
+        # project 3D Gaussian to 2D Gaussian
         projected = project_gaussians(splats, camera)
         count = len(projected.opacities)
         if count > self.maximum_splats:
             raise ValueError(f"Renderer capacity {self.maximum_splats:,} is below {count:,} visible splats.")
+
+        # copy data to Wrap array
         self.centres.assign(wp.array(projected.centres, dtype=wp.vec2, device=self.device))
         self.conics.assign(wp.array(projected.conics, dtype=wp.vec3, device=self.device))
         self.colours.assign(wp.array(projected.colors, dtype=wp.vec3, device=self.device))
         self.opacities.assign(wp.array(projected.opacities, dtype=wp.float32, device=self.device))
+
+        # calculate the effective range for each Gaussian
         supports = compact_support(projected.opacities)
         self.supports.assign(wp.array(supports, dtype=wp.float32, device=self.device))
+
+        # launch the concurrent pipeline
         wp.launch(rasterize, dim=self.width * self.height,
                   inputs=[self.centres, self.conics, self.colours, self.opacities, self.supports,
                           count, self.width, wp.vec3(*background), self.image],
