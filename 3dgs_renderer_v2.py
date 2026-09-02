@@ -46,7 +46,7 @@ def rasterize(
 
     # use wp instead of numpy in kernels
     pixel_color = wp.vec3(0.0, 0.0, 0.0)
-    transmittance = 1.0
+    transmittance = float(1.0)
 
     for i in range(count):
         dx = px - centres[i][0]
