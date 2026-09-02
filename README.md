@@ -61,3 +61,15 @@ python .\3dgs_renderer_v1.py .\5splats.ply .\five.png `
   --width 400 --height 400 --focal-length 350 `
   --camera-position 0 0 -2 --look-at 0 0 0 --up 0 -1 0
 ```
+
+## Check v1/2/3 can get the same 5splats rendered result
+```bash
+python 3dgs_renderer_v1.py 5splats.ply v1.png --width 400 --height 400 --focal-length 350 --camera-position 0 0 -2 --look-at 0 0 0 --up 0 -1 0
+
+python 3dgs_renderer_v2.py 5splats.ply v2.png --width 400 --height 400 --focal-length 350 --camera-position 0 0 -2 --look-at 0 0 0 --up 0 -1 0 --device cuda:0
+
+python 3dgs_renderer_v3.py 5splats.ply v3.png `
+  --width 400 --height 400 --focal-length 350 `
+  --camera-position 0 0 -2 --look-at 0 0 0 --up 0 -1 0 `
+  --device cuda:0 --tile-pair-capacity 1024
+```
