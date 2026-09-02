@@ -12,10 +12,15 @@ learning, but not suitable for large scenes. Unit 4 explains tiled binning.
 
 from __future__ import annotations
 
-import argparse
+import argparse 
+# read command line parameters
 
 import numpy as np
+# compute (matrix, vectos, etc)
+
 from PIL import Image
+# export the calculated result to png
+
 import sys
 from pathlib import Path
 
@@ -47,14 +52,15 @@ def compact_support(opacities: np.ndarray) -> np.ndarray:
     """
     opacities = np.asarray(opacities, dtype=np.float32)
     supports = np.zeros(len(opacities), dtype=np.float32)
-    visible = opacities > ALPHA_CUTOFF
+    visible = opacities > ALPHA_CUTOFF # if the opacity of an Gaussian is less than 1/255, meaning that it is too faded to see, so can skip it
     supports[visible] = np.minimum(
-        SUPPORT_RADIUS_SQUARED,
+        SUPPORT_RADIUS_SQUARED, # max 3 sigma
         COMPACT_BOX_BETA * 2.0 * np.log(opacities[visible] / ALPHA_CUTOFF),
     )
     return supports
 
 
+# project 3d gaussians to 2d gaussians
 def project_gaussians(
     splats: GaussianSet,
     camera: Camera,
@@ -67,33 +73,47 @@ def project_gaussians(
     scale_squared = splats.scales * splats.scales
     covariance_world = np.einsum(
         "nij,nj,nkj->nik", rotation_world, scale_squared, rotation_world
-    )
+    ) # get the covariance of the gaussian
 
+    # convert world coordinates to camera coordinates
     world_h = np.concatenate(
         (splats.means, np.ones((len(splats.means), 1), dtype=np.float32)), axis=1
     )
     camera_h = world_h @ camera.world_to_camera.T
     mean_camera = camera_h[:, :3]
-    depth = mean_camera[:, 2]
+    depth = mean_camera[:, 2] # the depth of each Gaussian
 
+    # convert Gaussian orientation to camera coordinates
+    # because a Gaussian may look different from different angles
     W = camera.world_to_camera[:3, :3]
     covariance_camera = W @ covariance_world @ W.T
 
+    # project 3D center to the screen
+    # only CENTER!
     x, y, z = mean_camera.T
     centres = np.stack(
         (camera.fx * x / z + camera.cx, camera.fy * y / z + camera.cy), axis=1
     )
 
+    # estimate how camera projection will impact the shape of this Gaussian
+    # other than the center (which is calculated in the previous step)
     jacobian = np.zeros((len(splats.means), 2, 3), dtype=np.float32)
     jacobian[:, 0, 0] = camera.fx / z
     jacobian[:, 0, 2] = -camera.fx * x / (z * z)
     jacobian[:, 1, 1] = camera.fy / z
     jacobian[:, 1, 2] = -camera.fy * y / (z * z)
     covariance_screen = jacobian @ covariance_camera @ np.swapaxes(jacobian, 1, 2)
+    # Add some effects ? to Gaussian, as some projected Gaussian may look very small (< 1 pixel)
+    # and that will result in figgering, zippery, eyc
+    # so by adding this can make the result more stable
     covariance_screen += filter_variance * np.eye(2, dtype=np.float32)
 
+    # based on the shape of 2D Gaussian, estimate its max radius
     eigenvalues = np.linalg.eigvalsh(covariance_screen)
     radii = np.sqrt(qmax * np.maximum(eigenvalues[:, 1], 0.0))
+
+    # filter out the Gaussians that cannot be seen
+    # e.g. out of the screen, behind the camera, etc.
     visible = (
         (depth > near)
         & (centres[:, 0] + radii >= 0.0)
@@ -103,6 +123,8 @@ def project_gaussians(
     )
 
     indices = np.flatnonzero(visible)
+    # If there is no visible Gaussian, return null
+    # so that it wont block the rest of the program
     if len(indices) == 0:
         return ProjectedGaussians(
             np.empty((0, 2), np.float32),
@@ -117,10 +139,15 @@ def project_gaussians(
     # index space. Deriving `conics` before the sort and then indexing it by `order` while the
     # other fields are indexed by the reassigned `indices` is equivalent, but leaves two
     # permutations of the same data four lines apart and silently desynchronises if either moves.
+    
+    # Front-to-back compositing
     indices = indices[np.argsort(depth[indices])]
 
+    # convert the 2D Gaussiann shape to a format that can be easier to calculated by pixel ?
     inverse = np.linalg.inv(covariance_screen[indices])
     conics = np.stack((inverse[:, 0, 0], inverse[:, 0, 1], inverse[:, 1, 1]), axis=1)
+
+    # return projected Gaussian
     return ProjectedGaussians(
         centres[indices].astype(np.float32),
         conics.astype(np.float32),
@@ -129,16 +156,18 @@ def project_gaussians(
         splats.opacities[indices].astype(np.float32),
     )
 
-
+# render image
 class CpuRenderer:
     """A sequential reference renderer: rows, pixels, then sorted splats."""
 
+    # constructor
+    # store the parameters needed for rendering
     def __init__(
         self,
-        camera: Camera,
-        near: float = 0.01,
-        filter_variance: float = 0.3,
-        qmax: float = SUPPORT_RADIUS_SQUARED,
+        camera: Camera, # look from where
+        near: float = 0.01, # dont render the place that is very close to the camera
+        filter_variance: float = 0.3, # add blurring effect to small Gaussians
+        qmax: float = SUPPORT_RADIUS_SQUARED, 
     ):
         self.camera = camera
         self.near = near
@@ -150,15 +179,21 @@ class CpuRenderer:
         splats: GaussianSet,
         background: tuple[float, float, float] = (1.0, 1.0, 1.0),
     ) -> np.ndarray:
-        projected = project_gaussians(
+        projected = project_gaussians( # project all Gaussians to screen
             splats,
             self.camera,
             near=self.near,
             filter_variance=self.filter_variance,
             qmax=self.qmax,
         )
+
+        # create an empty image
         image = np.zeros((self.camera.height, self.camera.width, 3), dtype=np.float32)
+
+        # prepare the background (set to white color by default)
         background_color = np.asarray(background, dtype=np.float32)
+
+        # set the effective range for each Gaussian (when could stop render this Gaussian)
         supports = compact_support(projected.opacities)
 
         # Deliberately sequential: one row, one pixel, and one splat at a time.
