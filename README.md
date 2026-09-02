@@ -73,3 +73,12 @@ python 3dgs_renderer_v3.py 5splats.ply v3.png `
   --camera-position 0 0 -2 --look-at 0 0 0 --up 0 -1 0 `
   --device cuda:0 --tile-pair-capacity 1024
 ```
+
+## Render lego.ply
+```bash
+# low fi test
+python 3dgs_renderer_v3.py lego.ply lego_v3_lowfi.png --width 400 --height 400 --focal-length 555.56 --camera-position 0 2.73726 2.95929 --look-at 0 0 0 --up 0 1 0 --device cuda:0
+
+# high fi (800 * 800) formal 
+python 3dgs_renderer_v3.py lego.ply lego_v3_800.png --width 800 --height 800 --focal-length 1111.11 --camera-position 0 2.73726 2.95929 --look-at 0 0 0 --up 0 1 0 --device cuda:0
+```
