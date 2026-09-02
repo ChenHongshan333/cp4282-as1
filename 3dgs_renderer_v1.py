@@ -36,7 +36,12 @@ for _candidate in (_here / "shared", _here.parent / "shared"):
 from camera import Camera
 from gaussian_set import GaussianSet
 from projected_gaussians import ProjectedGaussians
-from splat_math import ALPHA_CUTOFF, SUPPORT_RADIUS_SQUARED, quaternion_to_matrix
+from splat_math import (
+    ALPHA_CUTOFF,
+    SUPPORT_RADIUS_SQUARED,
+    TRANSMITTANCE_CUTOFF,
+    quaternion_to_matrix,
+)
 # A faint splat reaches ALPHA_CUTOFF sooner than a strong one, so it can be truncated sooner than
 # the full 3-sigma disc. `beta` scales how quickly that happens. Note the Warp trainers use
 # `compact_box.beta = 0.5`; these renderers keep 1.0, which is what v2 and v3 have always applied.
@@ -201,12 +206,51 @@ class CpuRenderer:
             y = py + 0.5
             for px in range(self.camera.width):
                 x = px + 0.5
-                # TODO: Calculate the RGB value at (x, y)
+
                 # Composite the sorted splats front to back, then finish with the
                 # background weighted by the remaining transmittance.
+                pixel_color = np.zeros(3, dtype=np.float32)
+                transmittance = 1.0
 
-                # TODO: The RHS is a placeholder
-                image[py, px] = np.zeros(3, dtype=np.float32)
+                for i in range(len(projected.opacities)):
+                    # calculate the relative distance between the current pixel to the center of Gaussian
+                    dx = x - projected.centres[i, 0]
+                    dy = y - projected.centres[i, 1]
+
+                    # use conic to calculate the ellipse distance
+                    a, b, c = projected.conics[i]
+
+                    mahalanobis_squared = (
+                        a * dx * dx + 2.0 * b * dx * dy + c * dy * dy
+                    )
+
+                    # if this pixel is out of the effective range of Gaussian, then skip
+                    if mahalanobis_squared > supports[i]:
+                        continue
+
+                    # calculate the opacity of this Gaussian at this pixel position
+                    alpha = projected.opacities[i] * np.exp(
+                        -0.5 * mahalanobis_squared
+                    )
+
+                    alpha = min(float(alpha), 0.99)
+
+                    # if the opacity if too vague, then skip
+                    if alpha < ALPHA_CUTOFF:
+                        continue
+
+                    # blend the color into this pixel
+                    pixel_color += (
+                        transmittance * alpha * projected.colors[i]
+                    )
+
+                    # update the rest of lights
+                    transmittance *= 1.0 - alpha
+
+                    if transmittance < TRANSMITTANCE_CUTOFF:
+                        break
+
+                image[py, px] = pixel_color + transmittance * background_color
 
         return image
 
