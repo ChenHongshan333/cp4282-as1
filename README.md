@@ -53,3 +53,11 @@ python scripts/check_setup.py
 
 Use `--help` on each renderer for its command-line arguments. Start with a low resolution while
 debugging.
+
+## Running test cases provided from course website unit 4
+### v1
+```bash
+python .\3dgs_renderer_v1.py .\5splats.ply .\five.png `
+  --width 400 --height 400 --focal-length 350 `
+  --camera-position 0 0 -2 --look-at 0 0 0 --up 0 -1 0
+```
