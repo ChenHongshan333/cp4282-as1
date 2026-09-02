@@ -43,14 +43,47 @@ def rasterize(
     pixel = wp.tid()
     px = float(pixel % width) + 0.5
     py = float(pixel // width) + 0.5
-    # TODO: Calculate the RGB at pixel (px, py)
-    # One work item per pixel: walk the globally depth-sorted splats, accumulate
-    # front to back, and composite the background with the leftover transmittance.
-    # This must reproduce 3dgs_renderer_v1 exactly.
-    
 
-    # TODO: The RHS is a placeholder
-    image[pixel] = wp.vec3(0.0, 0.0, 0.0)
+    # use wp instead of numpy in kernels
+    pixel_color = wp.vec3(0.0, 0.0, 0.0)
+    transmittance = 1.0
+
+    for i in range(count):
+        dx = px - centres[i][0]
+        dy = py - centres[i][1]
+
+        a = conics[i][0]
+        b = conics[i][1]
+        c = conics[i][2]
+
+        mahalanobis_squared = (
+            a * dx * dx
+            + 2.0 * b * dx * dy
+            + c * dy * dy
+        )
+
+        if mahalanobis_squared > supports[i]:
+            continue
+
+        alpha = opacities[i] * wp.exp(
+            -0.5 * mahalanobis_squared
+        )
+        alpha = wp.min(alpha, 0.99)
+
+        if alpha < ALPHA_CUTOFF:
+            continue
+
+        pixel_color = (
+            pixel_color
+            + transmittance * alpha * colours[i]
+        )
+
+        transmittance = transmittance * (1.0 - alpha)
+
+        if transmittance < TRANSMITTANCE_CUTOFF:
+            break
+
+    image[pixel] = pixel_color + transmittance * background
 
 # manage Wrap memory
 # it does 2 things:
